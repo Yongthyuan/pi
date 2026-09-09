@@ -107,16 +107,25 @@ export function createGrepToolDefinition(
 					return;
 				}
 				let settled = false;
+				let stopChild: (() => void) | undefined;
 				const settle = (fn: () => void) => {
 					if (!settled) {
 						settled = true;
+						signal?.removeEventListener("abort", onAbort);
+						stopChild = undefined;
 						fn();
 					}
 				};
+				const onAbort = () => {
+					if (stopChild) stopChild();
+					else settle(() => reject(new Error("Operation aborted")));
+				};
+				signal?.addEventListener("abort", onAbort, { once: true });
 
 				(async () => {
 					try {
 						const rgPath = await ensureTool("rg");
+						if (settled) return;
 						if (!rgPath) {
 							settle(() => reject(new Error("ripgrep (rg) is not available and could not be downloaded")));
 							return;
@@ -131,6 +140,7 @@ export function createGrepToolDefinition(
 							settle(() => reject(new Error(`Path not found: ${searchPath}`)));
 							return;
 						}
+						if (settled) return;
 
 						const contextValue = context && context > 0 ? context : 0;
 						const effectiveLimit = Math.max(1, limit ?? DEFAULT_LIMIT);
@@ -171,25 +181,20 @@ export function createGrepToolDefinition(
 						let matchCount = 0;
 						let matchLimitReached = false;
 						let linesTruncated = false;
-						let aborted = false;
 						let killedDueToLimit = false;
 						const outputLines: string[] = [];
 
 						const cleanup = () => {
 							rl.close();
-							signal?.removeEventListener("abort", onAbort);
+							stopChild = undefined;
 						};
-						const stopChild = (dueToLimit = false) => {
+						const killChild = (dueToLimit = false) => {
 							if (!child.killed) {
 								killedDueToLimit = dueToLimit;
 								child.kill();
 							}
 						};
-						const onAbort = () => {
-							aborted = true;
-							stopChild();
-						};
-						signal?.addEventListener("abort", onAbort, { once: true });
+						stopChild = killChild;
 						child.stderr?.on("data", (chunk) => {
 							stderr += chunk.toString();
 						});
@@ -233,7 +238,7 @@ export function createGrepToolDefinition(
 									matches.push({ filePath, lineNumber, lineText });
 								if (matchCount >= effectiveLimit) {
 									matchLimitReached = true;
-									stopChild(true);
+									killChild(true);
 								}
 							}
 						});
@@ -244,7 +249,7 @@ export function createGrepToolDefinition(
 						});
 						child.on("close", async (code) => {
 							cleanup();
-							if (aborted) {
+							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
 								return;
 							}
@@ -273,6 +278,7 @@ export function createGrepToolDefinition(
 									outputLines.push(`${relativePath}:${match.lineNumber}: ${truncatedText}`);
 								} else {
 									const block = await formatBlock(match.filePath, match.lineNumber);
+									if (settled) return;
 									outputLines.push(...block);
 								}
 							}
