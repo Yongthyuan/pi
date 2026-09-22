@@ -1,4 +1,4 @@
-import { access, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -96,9 +96,111 @@ describe("withFileMutationQueue", () => {
 
 		expect(order).toEqual(["target:start", "target:end", "alias:start", "alias:end"]);
 	});
+
+	// #9389: missing targets and existing targets must resolve to the same queue.
+	it.each(["new.txt", "nested/new.txt"])("serializes new %s through a directory symlink", async (relativePath) => {
+		const dir = await createTempDir();
+		const targetDir = join(dir, "target");
+		const aliasDir = join(dir, "alias");
+		await mkdir(targetDir);
+		await symlink(targetDir, aliasDir, "junction");
+		const firstStarted = createDeferred();
+		const releaseFirst = createDeferred();
+		const order: string[] = [];
+		const first = withFileMutationQueue(join(targetDir, relativePath), async () => {
+			order.push("first:start");
+			firstStarted.resolve();
+			await releaseFirst.promise;
+			order.push("first:end");
+		});
+		await firstStarted.promise;
+		const second = withFileMutationQueue(join(aliasDir, relativePath), async () => {
+			order.push("second:start");
+		});
+		try {
+			// Registration is ordered; a different file can proceed once both aliases are registered.
+			await withFileMutationQueue(join(dir, "unrelated.txt"), async () => {});
+			expect(order).toEqual(["first:start"]);
+		} finally {
+			releaseFirst.resolve();
+			await Promise.all([first, second]);
+		}
+		expect(order).toEqual(["first:start", "first:end", "second:start"]);
+	});
+
+	// #9389: creating a file must not change its queue while a write is still active.
+	it("keeps the same queue when a file is created through a directory symlink", async () => {
+		const dir = await createTempDir();
+		const targetDir = join(dir, "target");
+		const aliasDir = join(dir, "alias");
+		await mkdir(targetDir);
+		await symlink(targetDir, aliasDir, "junction");
+		const path = join(aliasDir, "new.txt");
+		const created = createDeferred();
+		const releaseFirst = createDeferred();
+		const order: string[] = [];
+		const first = withFileMutationQueue(path, async () => {
+			await writeFile(path, "first\n");
+			order.push("first:created");
+			created.resolve();
+			await releaseFirst.promise;
+			order.push("first:end");
+		});
+		await created.promise;
+		const second = withFileMutationQueue(path, async () => {
+			order.push("second:start");
+			await writeFile(path, "second\n");
+		});
+		try {
+			await withFileMutationQueue(join(dir, "unrelated.txt"), async () => {});
+			expect(order).toEqual(["first:created"]);
+		} finally {
+			releaseFirst.resolve();
+			await Promise.all([first, second]);
+		}
+		expect(order).toEqual(["first:created", "first:end", "second:start"]);
+		expect(await readFile(path, "utf8")).toBe("second\n");
+	});
 });
 
 describe("built-in edit and write tools", () => {
+	// #9389: a later write through an alias must not be overwritten by an earlier slow write.
+	it("preserves write order for a new file reached through a directory symlink", async () => {
+		const dir = await createTempDir();
+		const targetDir = join(dir, "target");
+		const aliasDir = join(dir, "alias");
+		await mkdir(targetDir);
+		await symlink(targetDir, aliasDir, "junction");
+		const firstStarted = createDeferred();
+		const releaseFirst = createDeferred();
+		const order: string[] = [];
+		const tool = createWriteTool(dir, {
+			operations: {
+				mkdir: async () => {},
+				writeFile: async (path, content) => {
+					order.push(content);
+					if (content === "first") {
+						firstStarted.resolve();
+						await releaseFirst.promise;
+					}
+					await writeFile(path, content);
+				},
+			},
+		});
+		const first = tool.execute("first", { path: "target/new.txt", content: "first" });
+		await firstStarted.promise;
+		const second = tool.execute("second", { path: "alias/new.txt", content: "second" });
+		try {
+			await withFileMutationQueue(join(dir, "unrelated.txt"), async () => {});
+			expect(order).toEqual(["first"]);
+		} finally {
+			releaseFirst.resolve();
+			await Promise.all([first, second]);
+		}
+		expect(order).toEqual(["first", "second"]);
+		expect(await readFile(join(targetDir, "new.txt"), "utf8")).toBe("second");
+	});
+
 	it("preserves both parallel edits on the same file", async () => {
 		const dir = await createTempDir();
 		const filePath = join(dir, "parallel-edit.txt");

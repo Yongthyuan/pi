@@ -1,5 +1,5 @@
 import { realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 
 const fileMutationQueues = new Map<string, Promise<void>>();
 let registrationQueue = Promise.resolve();
@@ -15,13 +15,20 @@ function isMissingPathError(error: unknown): boolean {
 
 async function getMutationQueueKey(filePath: string): Promise<string> {
 	const resolvedPath = resolve(filePath);
-	try {
-		return await realpath(resolvedPath);
-	} catch (error) {
-		if (isMissingPathError(error)) {
-			return resolvedPath;
+	let existingPath = resolvedPath;
+	const missingSegments: string[] = [];
+	while (true) {
+		try {
+			return resolve(await realpath(existingPath), ...missingSegments);
+		} catch (error) {
+			if (!isMissingPathError(error)) throw error;
+			const parent = dirname(existingPath);
+			if (parent === existingPath) return resolvedPath;
+			// New files must share the same key before and after creation, including
+			// when an existing ancestor is reached through a directory symlink.
+			missingSegments.unshift(basename(existingPath));
+			existingPath = parent;
 		}
-		throw error;
 	}
 }
 
