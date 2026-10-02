@@ -55,7 +55,9 @@ export function normalizeForFuzzyMatch(text: string): string {
 }
 
 function splitLinesWithEndings(content: string): string[] {
-	return content.match(/[^\n]*\n|[^\n]+/g) ?? [];
+	// Keep the final logical line even if fuzzy normalization makes it empty.
+	const lines = content.split("\n");
+	return lines.map((line, index) => (index < lines.length - 1 ? `${line}\n` : line));
 }
 
 interface LineSpan {
