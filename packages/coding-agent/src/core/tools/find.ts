@@ -198,14 +198,21 @@ export function createFindToolDefinition(
 						if (!insideGitRepo) args.push("--no-require-git");
 						args.push("--max-results", String(effectiveLimit));
 
-						// fd --glob matches against the basename unless --full-path is set; in --full-path
-						// mode it matches against the absolute candidate path, so a path-containing
-						// pattern like 'src/**/*.spec.ts' needs a leading '**/' to match anything.
+						// fd --full-path matches absolute paths. Anchor relative path patterns to
+						// the search root so its ancestors cannot satisfy part of the pattern.
 						let effectivePattern = pattern;
 						if (pattern.includes("/")) {
 							args.push("--full-path");
-							if (!pattern.startsWith("/") && !pattern.startsWith("**/") && pattern !== "**") {
-								effectivePattern = `**/${pattern}`;
+							if (!path.isAbsolute(pattern)) {
+								const escapedRoot = searchPath
+									.split(path.sep)
+									.join("/")
+									.replace(/\/$/, "")
+									.replaceAll("\\", "\\\\")
+									.replace(/[*?[\]{}]/g, "[$&]");
+								effectivePattern = `${escapedRoot}/${pattern.replace(/^(\.\/)+/, "")}`;
+								// Adding the root must not change fd's smart-case behavior.
+								args.push(/\p{Uppercase}/u.test(pattern) ? "--case-sensitive" : "--ignore-case");
 							}
 							// fd matches full paths using native separators on Windows.
 							if (process.platform === "win32")
