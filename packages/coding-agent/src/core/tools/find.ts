@@ -266,8 +266,7 @@ export function createFindToolDefinition(
 							}
 
 							const relativized: string[] = [];
-							for (const rawLine of lines) {
-								const line = rawLine.replace(/\r$/, "").trim();
+							for (const line of lines) {
 								if (!line) continue;
 								relativized.push(relativizeFindResultPath(line, searchPath));
 							}
